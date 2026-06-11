@@ -54,11 +54,24 @@ def review_code(request: ReviewRequest):
     try:
         logger.start_session(request.code)
 
+        # run input guardrail first
+        from guardrails.input_guard import run_input_guard
+        input_guard_result = run_input_guard(request.code)
+        
+        logger.log_guardrail("input_guard", input_guard_result["blocked"])
+        logger.log_guardrail("pii_detected", input_guard_result["pii"]["detected"])
+
+        if input_guard_result["blocked"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Input blocked: {input_guard_result['message']}"
+            )
+
         initial_state: CodeReviewState = {
             "code": request.code,
             "language": request.language,
-            "pii_detected": False,
-            "injection_detected": False,
+            "pii_detected": input_guard_result["pii"]["detected"],
+            "injection_detected": input_guard_result["injection"]["detected"],
             "security_issues": None,
             "performance_issues": None,
             "style_issues": None,
@@ -70,6 +83,14 @@ def review_code(request: ReviewRequest):
         }
 
         result = review_graph.invoke(initial_state)
+
+        # run output guardrail on critic output
+        from guardrails.output_guard import run_output_guard
+        output_guard_result = run_output_guard(
+            result["critic_output"] or "",
+            "critic"
+        )
+        logger.log_guardrail("output_flagged", output_guard_result["flagged"])
 
         logger.log_final(
             agent_path=result["agent_path"],
@@ -85,6 +106,9 @@ def review_code(request: ReviewRequest):
             total_issues=result["total_issues"],
             language=result["language"]
         )
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
